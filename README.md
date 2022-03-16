@@ -3,4 +3,4 @@ This analysis looks at incident reports of birds impacting aircraft in the Unite
 harmonize, and further prepare the data contained in the csv file. After hosting the database through Amazon Web Service, the tables were populated and analysis was conducted by querying the 
 database.
 
-[R Notebook Knit](practicumv2.nb.pdf)
+[R Notebook Knit](/practicumv2.nb.pdf)
