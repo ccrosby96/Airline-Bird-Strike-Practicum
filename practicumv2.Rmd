@@ -1,0 +1,359 @@
+---
+title: "Practicum Notebook"
+output: html_notebook
+author: Calvin Crosby, Kristine Umeh
+email: crosby.ca@northeastern.edu, umeh.k@northeastern.edu
+---
+Required packages to be installed:
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Connecting to the database 
+```{r}
+# 1. Library
+library(RMySQL)
+# 2. Settings
+db_user <- 'admin'
+db_password <- 'Swayze96'
+db_name <- 'birddb'
+db_host <- 'birddb.cd3w70rzjf0l.us-east-2.rds.amazonaws.com'
+db_port <- 3306
+
+# 3. Read data from db
+mydb <-  dbConnect(MySQL(), user = db_user, password = db_password,
+                 dbname = db_name, host = db_host, port = db_port)
+```
+Drop statements to empty database
+```{sql connection=mydb}
+DROP TABLE IF EXISTS incidents
+```
+
+```{sql connection=mydb}
+DROP TABLE IF EXISTS airlines
+```
+
+```{sql connection=mydb}
+DROP TABLE IF EXISTS airports
+```
+Schema defined for airlines table
+```{sql connection=mydb}
+create table airlines(
+  aid INT NOT NULL,
+  code VARCHAR(200)NOT NULL DEFAULT 'unknown',
+  airline VARCHAR(200) UNIQUE NOT NULL DEFAULT 'unknown',
+  PRIMARY KEY (aid)
+);
+
+```
+Schema defined for airports table
+```{sql connection=mydb}
+create table airports(
+pid INT NOT NULL,
+code VARCHAR(200)NOT NULL DEFAULT 'unknown',
+name VARCHAR(200)UNIQUE NOT NULL DEFAULT 'unknown',
+city VARCHAR(200) NOT NULL DEFAULT 'unknown',
+state VARCHAR(200)NOT NULL DEFAULT 'unknown',
+country VARCHAR(200)NOT NULL DEFAULT 'unknown',
+PRIMARY KEY (pid)
+);
+```
+Schema defined for incidents table
+```{sql connection=mydb}
+create table incidents (
+  iid INT NOT NULL,
+  dateOnly DATE DEFAULT NULL,
+  depPort INT,
+  arrPort INT,
+  airline INT,
+  aircraft VARCHAR(200)NOT NULL DEFAULT 'unknown',
+  flightPhase VARCHAR(12)NOT NULL DEFAULT 'unknown',
+  impact VARCHAR(200) NOT NULL DEFAULT 'unknown',
+  PRIMARY KEY (iid),
+  FOREIGN KEY (airline) REFERENCES airlines(aid),
+  FOREIGN KEY (depPort) REFERENCES airports(pid),
+  FOREIGN KEY (arrPort) References airports(pid)
+)
+```
+
+```{r}
+install.packages("hash")
+```
+A hash map is made to map possible encountered values to harmonized values. It is used by
+my harmonizer function
+```{r}
+library(hash)
+
+flightMap <- hash()
+flightMap[["Take-off run"]] <- "takeoff"
+flightMap[["Landing Roll"]] <- "landing"
+flightMap[["Climb"]] <- "inflight"
+flightMap[["Approach"]] <- "inflight"
+flightMap[["Descent"]] <- "inflight"
+flightMap[["Taxi"]] <- "takeoff"
+flightMap[["Parked"]]<- "unknown"
+flightMap[[" "]]<- "unknown"
+```
+Defining my phase harmonizer function. Tests are run at the end to show functionality
+```{r}
+# This function is used to harmonize the flight phase data from the csv.
+# It references the flightMap hashmap and returns the appropriate string corresponding
+# to a known phase or it returns "unknown" if an unrecognized or NULL value is
+# encountered.
+phaseHarmonizer <- function(flightPhase){
+  if (is.null(flightPhase)){
+    return("unknown")
+  }
+  if (has.key(flightPhase,flightMap)){
+    return(flightMap[[flightPhase]])
+  }
+  return("unknown")
+}
+phaseHarmonizer("Take-off run") 
+phaseHarmonizer('Take-off run')
+phaseHarmonizer("Climbing")
+phaseHarmonizer("In the ocean lol")
+phaseHarmonizer("Landing Roll")
+phaseHarmonizer(NULL)
+phaseHarmonizer("Taxi")
+phaseHarmonizer("Parked")
+```
+This reads in the csv file and stores it in a data frame. Duplicates are removed
+```{r}
+require(readr)
+library(tidyverse)
+birds <- read_csv('BirdStrikesData.csv')
+birds[!duplicated(birds$`Record ID`), ] #remove duplicates
+```
+
+This uses my custom phaseHarmonizer function to update the birds data frame flight Phase
+column. It checks for additional cases like empty strings and null values
+```{r}
+nrows <- nrow(birds)
+
+for (i in 1:nrows){
+  if (is.na(birds[[i,14]]) | birds[[i,14]] == '')
+    birds[[i,14]] == "unknown"
+  else if (is.null(birds[[i,14]]))
+    birds[[i,14]] == "unknown"
+  else if (birds[[i,14]]== ""){
+    birds[[i,14]] <- "unknown"
+  }
+  else{
+    temp <- birds[[i,14]]
+    temp <- phaseHarmonizer(temp)
+    birds[[i,14]] <- temp
+    }
+  }
+```
+
+```{r}
+birds
+```
+
+```{r}
+library(anytime)
+
+print(typeof(birds))
+print(typeof(birds[,12]))
+#airlineData is used to populate airline table, aid is auto-incremented
+airlineData <- data.frame(airline = distinct(birds[,12])) #look up table for airlines
+airlineData <- transmute(airlineData, airline=`Aircraft..Airline.Operator`,aid=1:n())
+
+#airportsData is used to populate the airports table, pid is auto-incremented
+airportsData <- data.frame(name = birds[,3],state=birds[,13])
+airportsData <- distinct(airportsData, `Airport..Name`, .keep_all = TRUE)
+airportsData <- transmute(airportsData, name = `Airport..Name`, state=`Origin.State`,pid=1:n())
+
+airports.name <- data.frame(name = birds$`Airport: Name`)
+airports.state <- data.frame(state = birds$`Origin State`)
+
+#airPFull <-cbind(airports.name,airports.state)
+#incidentsFull <-cbind(incidents.iid,incidents.date)
+
+
+incidentsFull <- transmute(birds, iid = `Record ID`, dateOnly= anydate(`FlightDate`),airline=birds$`Aircraft: Airline/Operator`, aircraft=`Aircraft: Make/Model`, flightPhase=`When: Phase of flight`, name=birds$`Airport: Name`,impact=`Effect: Impact to flight`)
+
+incidentsFull <- left_join(incidentsFull, airlineData, by = "airline")
+incidentsFull <- left_join(incidentsFull, airportsData, by = "name")
+
+# IncidentsFull is the dataframe for the incidents table
+tail(incidentsFull)
+
+```
+
+```{sql connection=mydb}
+DROP TABLE IF EXISTS airlinesAUX
+
+```
+
+```{sql connection=mydb}
+DROP TABLE IF EXISTS airportsAUX
+
+```
+
+```{sql connection=mydb}
+DROP TABLE IF EXISTS incidentsAUX
+```
+Writing data into our auxillary tables
+```{r}
+dbWriteTable(mydb,"incidentsAUX",incidentsFull,overwrite=F,append=T)
+dbWriteTable(mydb,"airlinesAUX",airlineData,overwrite=F,append=T)
+dbWriteTable(mydb,"airportsAUX",airportsData,overwrite=F,append=T)
+```
+Inserting data into the airlines auxillary table
+```{sql connection=mydb}
+INSERT INTO airlines(aid,airline) SELECT aid,airline FROM airlinesAUX;
+```
+Showing data in airlines table in the database
+```{sql connection=mydb}
+SELECT * FROM airlines
+```
+Inserting data into airports table from airport auxillary table
+```{sql connection=mydb}
+INSERT INTO airports(pid,name,state) SELECT pid,name,state FROM airportsAUX;
+```
+Showing the airports table in the database
+```{sql connection=mydb}
+SELECT * FROM airports
+```
+Inserting data into incidents table from the incidents auxillary table
+```{sql connection=mydb}
+INSERT INTO incidents(iid,dateOnly,depPort,arrPort,airline,aircraft,flightPhase,impact)
+SELECT iid,dateOnly,pid,pid,aid,aircraft,flightPhase,impact
+FROM incidentsAUX;
+```
+Taking a look at my incidents table in the database
+```{sql connection=mydb}
+SELECT * FROM incidents
+```
+
+Query 1
+```{sql connection=mydb}
+SELECT 
+airlines.airline AS 'ARRIVING AIR LINE',
+COUNT(incidents.iid)AS 'NUM OF INCIDENTS'
+FROM incidents
+INNER JOIN airports ON airports.pid = incidents.arrPort
+INNER JOIN airlines ON airlines.aid = incidents.airline
+WHERE
+(
+(airports.name like '%LaGuardia%')
+AND
+(incidents.flightPhase = 'landing')
+)
+GROUP BY airlines.airline
+```
+
+Query 2
+```{sql connection=mydb}
+SELECT * FROM (
+SELECT depPort,arrPort,airports.pid,airports.name,
+COUNT(iid) AS 'COUNT_OF_INCIDENTS'
+FROM incidents
+INNER JOIN airlines ON incidents.airline = airlines.aid
+INNER JOIN airports ON incidents.depPort = airports.pid
+WHERE
+(
+  (
+    (
+    UPPER(airlines.airline) NOT LIKE '%BUSINESS%'
+    )
+    AND
+    (UPPER(airlines.airline) NOT LIKE '%MILITARY%'
+    )
+    AND
+    (UPPER(airlines.airline)NOT LIKE '%CORP%'
+    )
+    AND
+    (UPPER(airlines.airline)NOT LIKE '%EXEC%'
+    )
+    AND
+    (UPPER(airlines.airline)NOT LIKE '%GOVERNMENT%'
+    )
+    AND
+    (UPPER(airlines.airline)NOT LIKE '%PRIVATE%'
+    )
+    AND 
+    (UPPER(airlines.airline)NOT LIKE '%UNKNOWN%'
+    )
+  )
+)
+GROUP BY depPort, arrPort,airports.pid,airports.name
+ORDER BY COUNT_OF_INCIDENTS DESC
+) AS COUNT_OF_COMMERCIAL_INC
+LIMIT 1
+```
+
+Query 3
+```{sql connection=mydb}
+SELECT
+YEAR(dateOnly) AS 'YEAR',
+COUNT(*) AS 'BIRD_STRIKES_PER_YEAR'
+FROM
+incidents
+GROUP BY YEAR(dateOnly)
+ORDER BY YEAR(dateOnly) ASC
+```
+Plotting the Bird Incidents from 2005 to 2011
+```{r}
+library(ggplot2)
+library(sqldf)
+frame <- dbGetQuery(mydb,"SELECT
+YEAR(dateOnly) AS 'YEAR',
+COUNT(*) AS 'BIRD_STRIKES_PER_YEAR'
+FROM
+incidents
+GROUP BY YEAR(dateOnly)
+ORDER BY YEAR(dateOnly) ASC")
+
+filtered <- subset(frame, YEAR>=2005 & YEAR<=2011)
+filteredmore <-subset(filtered,!is.null(YEAR))
+print(filteredmore)
+year <- filtered[,1]
+bird_strikes <- filtered[,2]
+#create data frame (frame) with above query using sqldf and pass into this:
+ggplot(filtered, aes(x=year,y=bird_strikes,group=1,colour="Bird Strikes"))+geom_line()+ geom_point()+
+  labs(title= "Bird Strikes Per Year vs. Year Recorded", x = "Year",y= "Bird Strikes")+scale_color_discrete(name = "Legend", labels = c("Bird Strikes "))+ theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+```{sql connection=mydb}
+DROP PROCEDURE IF EXISTS delAirline;
+```
+Making our Stored Procedure
+```{sql connection=mydb}
+CREATE PROCEDURE delAirline(IN airlineid INT)  
+BEGIN
+  DELETE 
+  FROM incidents
+      WHERE incidents.airline = airlineid;
+  DELETE FROM airlines
+  WHERE airlines.aid = airlineid;
+END;
+```
+
+--Calling our stored procedure to delete the airline with aid 20
+```{sql connection=mydb}
+CALL delAirline(20);
+```
+Proving the records have been removed
+```{sql connection=mydb}
+
+SELECT * FROM airlines
+WHERE airlines.aid = 20;
+
+
+```
+Proving the records have been removed
+```{sql connection=mydb}
+
+SELECT * FROM incidents
+WHERE incidents.airline = 20;
+```
+## Disconnect from Database
+
+```{r}
+dbDisconnect(mydb)
+```
+
